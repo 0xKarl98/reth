@@ -711,10 +711,10 @@ mod tests {
 
         // Modify the state to create a mismatch
         let addr = Address::from([1u8; 20]);
-        if let Some(account) = modified_state.state.get_mut(&addr) {
-            if let Some(ref mut info) = account.info {
-                info.balance = U256::from(999);
-            }
+        if let Some(account) = modified_state.state.get_mut(&addr) &&
+            let Some(ref mut info) = account.info
+        {
+            info.balance = U256::from(999);
         }
 
         let block_prefix = "test_block_mismatch";
