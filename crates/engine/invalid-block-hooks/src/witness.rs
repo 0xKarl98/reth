@@ -438,8 +438,10 @@ mod tests {
         // Add reverts for multiple blocks using different accounts
         let addresses: Vec<Address> = bundle_state.state.keys().copied().collect();
         for (i, addr) in addresses.iter().take(2).enumerate() {
-            let mut revert = AccountRevert::default();
-            revert.wipe_storage = i == 0; // First account has storage wiped
+            let revert = AccountRevert {
+                wipe_storage: i == 0, // First account has storage wiped
+                ..AccountRevert::default()
+            };
             bundle_state.reverts.push(vec![(*addr, revert)]);
         }
 
