@@ -9,7 +9,6 @@ use reth_provider::{BlockExecutionOutput, StateProvider, StateProviderFactory};
 use reth_revm::{
     database::StateProviderDatabase,
     db::{BundleState, State},
-    state::AccountInfo,
 };
 use reth_rpc_api::DebugApiClient;
 use reth_tracing::tracing::warn;
@@ -378,89 +377,75 @@ mod tests {
     use tempfile::TempDir;
 
     use reth_revm::test_utils::StateProviderTest;
-    use reth_testing_utils::generators::{self, random_block, BlockParams};
+    use reth_testing_utils::generators::{self, random_block, random_eoa_accounts, BlockParams};
     use revm_bytecode::Bytecode;
-    //Fixture function
+
+    /// Creates a test BundleState using generators for more realistic test data
     fn create_bundle_state() -> BundleState {
+        let mut rng = generators::rng();
         let mut bundle_state = BundleState::default();
 
-        // Add two accounts with info, storage, and different statuses
-        let addr1 = Address::from([1u8; 20]);
-        let addr2 = Address::from([2u8; 20]);
+        // Generate realistic EOA accounts using generators
+        let accounts = random_eoa_accounts(&mut rng, 3);
 
-        let mut storage1 = HashMap::default();
-        storage1.insert(
-            U256::from(1),
-            StorageSlot {
-                present_value: U256::from(10),
-                previous_or_original_value: U256::from(15),
-            },
-        );
-        storage1.insert(
-            U256::from(2),
-            StorageSlot {
-                present_value: U256::from(20),
-                previous_or_original_value: U256::from(25),
-            },
-        );
+        for (i, (addr, account)) in accounts.into_iter().enumerate() {
+            // Create storage entries for each account
+            let mut storage = HashMap::default();
+            let storage_key = U256::from(i + 1);
+            storage.insert(
+                storage_key,
+                StorageSlot {
+                    present_value: U256::from((i + 1) * 10),
+                    previous_or_original_value: U256::from((i + 1) * 15),
+                },
+            );
 
-        let bundle_account1 = BundleAccount {
-            info: Some(AccountInfo {
-                balance: U256::from(100),
-                nonce: 1,
-                code_hash: B256::from([3u8; 32]),
-                code: None,
-            }),
-            original_info: Some(AccountInfo {
-                balance: U256::from(50),
-                nonce: 0,
-                code_hash: B256::from([3u8; 32]),
-                code: None,
-            }),
-            storage: storage1,
-            status: AccountStatus::default(),
-        };
+            let bundle_account = BundleAccount {
+                info: Some(AccountInfo {
+                    balance: account.balance,
+                    nonce: account.nonce,
+                    code_hash: account.bytecode_hash.unwrap_or_default(),
+                    code: None,
+                }),
+                original_info: if i == 0 {
+                    Some(AccountInfo {
+                        balance: account.balance.checked_div(U256::from(2)).unwrap_or(U256::ZERO),
+                        nonce: 0,
+                        code_hash: account.bytecode_hash.unwrap_or_default(),
+                        code: None,
+                    })
+                } else {
+                    None
+                },
+                storage,
+                status: AccountStatus::default(),
+            };
 
-        let mut storage2 = HashMap::default();
-        storage2.insert(
-            U256::from(3),
-            StorageSlot {
-                present_value: U256::from(30),
-                previous_or_original_value: U256::from(35),
-            },
-        );
+            bundle_state.state.insert(addr, bundle_account);
+        }
 
-        let bundle_account2 = BundleAccount {
-            info: Some(AccountInfo {
-                balance: U256::from(200),
-                nonce: 2,
-                code_hash: B256::from([4u8; 32]),
-                code: None,
-            }),
-            original_info: None,
-            storage: storage2,
-            status: AccountStatus::default(),
-        };
+        // Generate realistic contract bytecode using generators
+        let contract_hashes: Vec<B256> = (0..3).map(|_| B256::random()).collect();
+        for (i, hash) in contract_hashes.iter().enumerate() {
+            let bytecode = match i {
+                0 => Bytes::from(vec![0x60, 0x80, 0x60, 0x40, 0x52]), // Simple contract
+                1 => Bytes::from(vec![0x61, 0x81, 0x60, 0x00, 0x39]), // Another contract
+                _ => Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xfd]), // REVERT contract
+            };
+            bundle_state.contracts.insert(*hash, Bytecode::new_raw(bytecode));
+        }
 
-        bundle_state.state.insert(addr1, bundle_account1);
-        bundle_state.state.insert(addr2, bundle_account2);
+        // Add reverts for multiple blocks using different accounts
+        let addresses: Vec<Address> = bundle_state.state.keys().copied().collect();
+        for (i, addr) in addresses.iter().take(2).enumerate() {
+            let mut revert = AccountRevert::default();
+            revert.wipe_storage = i == 0; // First account has storage wiped
+            bundle_state.reverts.push(vec![(*addr, revert)]);
+        }
 
-        // Add two contracts
-        let contract_hash1 = B256::from([5u8; 32]);
-        let contract_hash2 = B256::from([6u8; 32]);
-        bundle_state
-            .contracts
-            .insert(contract_hash1, Bytecode::new_raw(Bytes::from(vec![0x60, 0x80])));
-        bundle_state
-            .contracts
-            .insert(contract_hash2, Bytecode::new_raw(Bytes::from(vec![0x61, 0x81])));
-
-        // Add reverts for one block
-        bundle_state.reverts.push(vec![(addr1, AccountRevert::default())]);
-
-        // Set non-default sizes
-        bundle_state.state_size = 42;
-        bundle_state.reverts_size = 7;
+        // Set realistic sizes
+        bundle_state.state_size = bundle_state.state.len();
+        bundle_state.reverts_size = bundle_state.reverts.len();
 
         bundle_state
     }
@@ -473,20 +458,20 @@ mod tests {
         let sorted = sort_bundle_state_for_comparison(&bundle_state);
 
         // Verify state_size and reverts_size values match the fixture
-        assert_eq!(sorted["state_size"], 42);
-        assert_eq!(sorted["reverts_size"], 7);
+        assert_eq!(sorted["state_size"], 3);
+        assert_eq!(sorted["reverts_size"], 2);
 
         // Verify state contains our mock accounts
         let state = sorted["state"].as_object().unwrap();
-        assert_eq!(state.len(), 2); // We added 2 accounts
+        assert_eq!(state.len(), 3); // We added 3 accounts
 
         // Verify contracts contains our mock contracts
         let contracts = sorted["contracts"].as_object().unwrap();
-        assert_eq!(contracts.len(), 2); // We added 2 contracts
+        assert_eq!(contracts.len(), 3); // We added 3 contracts
 
-        // Verify reverts is an array with one block of reverts
+        // Verify reverts is an array with multiple blocks of reverts
         let reverts = sorted["reverts"].as_array().unwrap();
-        assert_eq!(reverts.len(), 1); // Fixture has one block of reverts
+        assert_eq!(reverts.len(), 2); // Fixture has two blocks of reverts
 
         // Verify that the state accounts have the expected structure
         for (_addr_key, account_data) in state {
@@ -533,8 +518,8 @@ mod tests {
         assert!(!returned_bundle_state.state.is_empty(), "Expected some state entries");
 
         // Verify the bundle state structure matches our fixture
-        assert_eq!(returned_bundle_state.state.len(), 2, "Expected 2 accounts from fixture");
-        assert_eq!(returned_bundle_state.contracts.len(), 2, "Expected 2 contracts from fixture");
+        assert_eq!(returned_bundle_state.state.len(), 3, "Expected 3 accounts from fixture");
+        assert_eq!(returned_bundle_state.contracts.len(), 3, "Expected 3 contracts from fixture");
     }
 
     #[test]
@@ -847,5 +832,192 @@ mod tests {
             files_after >= files_before,
             "on_invalid_block should attempt to create output files during processing"
         );
+    }
+
+    #[test]
+    fn test_handle_witness_operations_with_empty_witness() {
+        let (hook, _output_dir, _temp_dir) = create_test_hook();
+        let witness = ExecutionWitness::default();
+        let block_prefix = "empty_witness_test";
+        let block_number = 12345;
+
+        let result = hook.handle_witness_operations(&witness, block_prefix, block_number);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_handle_witness_operations_with_zero_block_number() {
+        let (hook, _output_dir, _temp_dir) = create_test_hook();
+        let witness = ExecutionWitness {
+            state: vec![Bytes::from("test_state")],
+            codes: vec![Bytes::from("test_code")],
+            keys: vec![Bytes::from("test_key")],
+            ..Default::default()
+        };
+        let block_prefix = "zero_block_test";
+        let block_number = 0;
+
+        let result = hook.handle_witness_operations(&witness, block_prefix, block_number);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_handle_witness_operations_with_large_witness_data() {
+        let (hook, _output_dir, _temp_dir) = create_test_hook();
+        let large_data = vec![0u8; 10000]; // 10KB of data
+        let witness = ExecutionWitness {
+            state: vec![Bytes::from(large_data.clone())],
+            codes: vec![Bytes::from(large_data.clone())],
+            keys: vec![Bytes::from(large_data)],
+            ..Default::default()
+        };
+        let block_prefix = "large_witness_test";
+        let block_number = 999999;
+
+        let result = hook.handle_witness_operations(&witness, block_prefix, block_number);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_bundle_state_with_empty_states() {
+        let (hook, _output_dir, _temp_dir) = create_test_hook();
+        let empty_state = BundleState::default();
+        let block_prefix = "empty_states_test";
+
+        let result = hook.validate_bundle_state(&empty_state, &empty_state, block_prefix);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_bundle_state_with_different_contract_counts() {
+        let (hook, output_dir, _temp_dir) = create_test_hook();
+        let state1 = create_bundle_state();
+        let mut state2 = create_bundle_state();
+
+        // Add extra contract to state2
+        let extra_contract_hash = B256::random();
+        state2.contracts.insert(
+            extra_contract_hash,
+            Bytecode::new_raw(Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xfd])), // REVERT opcode
+        );
+
+        let block_prefix = "different_contracts_test";
+        let result = hook.validate_bundle_state(&state1, &state2, block_prefix);
+        assert!(result.is_ok());
+
+        // Verify diff files were created
+        let diff_file = output_dir.join(format!("{}.bundle_state.diff", block_prefix));
+        assert!(diff_file.exists());
+    }
+
+    #[test]
+    fn test_save_diff_with_identical_values() {
+        let (hook, output_dir, _temp_dir) = create_test_hook();
+        let value1 = "identical_value";
+        let value2 = "identical_value";
+        let filename = "identical_diff_test".to_string();
+
+        let result = hook.save_diff(filename.clone(), &value1, &value2);
+        assert!(result.is_ok());
+
+        let diff_file = output_dir.join(filename);
+        assert!(diff_file.exists());
+    }
+
+    #[test]
+    fn test_validate_state_root_and_trie_without_trie_updates() {
+        let (hook, _output_dir, _temp_dir) = create_test_hook();
+        let bundle_state = create_bundle_state();
+
+        let mut rng = generators::rng();
+        let parent_header = generators::random_header(&mut rng, 1, None);
+        let recovered_block = random_block(
+            &mut rng,
+            2,
+            BlockParams {
+                parent: Some(parent_header.hash()),
+                tx_count: Some(0),
+                ..Default::default()
+            },
+        )
+        .try_recover()
+        .unwrap();
+
+        let block_prefix = "no_trie_updates_test";
+
+        // Test without trie updates (None case)
+        let result = hook.validate_state_root_and_trie(
+            &parent_header,
+            &recovered_block,
+            &bundle_state,
+            None,
+            block_prefix,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_complete_invalid_block_workflow() {
+        let (hook, _output_dir, _temp_dir) = create_test_hook();
+        let mut rng = generators::rng();
+
+        // Create a realistic block scenario
+        let parent_header = generators::random_header(&mut rng, 100, None);
+        let invalid_block = random_block(
+            &mut rng,
+            101,
+            BlockParams {
+                parent: Some(parent_header.hash()),
+                tx_count: Some(3),
+                ..Default::default()
+            },
+        )
+        .try_recover()
+        .unwrap();
+
+        let bundle_state = create_bundle_state();
+        let trie_updates = create_test_trie_updates();
+
+        // Test validation methods
+        let validation_result =
+            hook.validate_bundle_state(&bundle_state, &bundle_state, "integration_test");
+        assert!(validation_result.is_ok(), "Bundle state validation should succeed");
+
+        let state_root_result = hook.validate_state_root_and_trie(
+            &parent_header,
+            &invalid_block,
+            &bundle_state,
+            Some((&trie_updates, B256::random())),
+            "integration_test",
+        );
+        assert!(state_root_result.is_ok(), "State root validation should succeed");
+    }
+
+    #[test]
+    fn test_integration_workflow_components() {
+        let (hook, _output_dir, _temp_dir) = create_test_hook();
+        let mut rng = generators::rng();
+
+        // Create test data
+        let parent_header = generators::random_header(&mut rng, 50, None);
+        let _invalid_block = random_block(
+            &mut rng,
+            51,
+            BlockParams {
+                parent: Some(parent_header.hash()),
+                tx_count: Some(2),
+                ..Default::default()
+            },
+        )
+        .try_recover()
+        .unwrap();
+
+        let bundle_state = create_bundle_state();
+        let _trie_updates = create_test_trie_updates();
+
+        // Test individual components that would be part of the complete flow
+        let validation_result =
+            hook.validate_bundle_state(&bundle_state, &bundle_state, "integration_component_test");
+        assert!(validation_result.is_ok(), "Component validation should succeed");
     }
 }
