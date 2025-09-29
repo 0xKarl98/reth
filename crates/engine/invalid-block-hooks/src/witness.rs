@@ -45,69 +45,59 @@ fn sort_bundle_state_for_comparison(bundle_state: &BundleState) -> serde_json::V
     })
 }
 
-/// Generates a witness for the given block and saves it to a file.
-#[derive(Debug)]
-struct DataCollector;
+fn collect_execution_data(
+    mut db: State<StateProviderDatabase<Box<dyn StateProvider>>>,
+) -> eyre::Result<CollectionResult> {
+    let bundle_state = db.take_bundle();
+    let mut codes = BTreeMap::new();
+    let mut preimages = BTreeMap::new();
+    let mut hashed_state = db.database.hashed_post_state(&bundle_state);
 
-impl DataCollector {
-    fn collect(
-        mut db: State<StateProviderDatabase<Box<dyn StateProvider>>>,
-    ) -> eyre::Result<CollectionResult> {
-        let bundle_state = db.take_bundle();
-        let mut codes = BTreeMap::new();
-        let mut preimages = BTreeMap::new();
-        let mut hashed_state = db.database.hashed_post_state(&bundle_state);
+    // Collect codes
+    db.cache.contracts.values().chain(bundle_state.contracts.values()).for_each(|code| {
+        let code_bytes = code.original_bytes();
+        codes.insert(keccak256(&code_bytes), code_bytes);
+    });
 
-        // Collect codes
-        db.cache.contracts.values().chain(bundle_state.contracts.values()).for_each(|code| {
-            let code_bytes = code.original_bytes();
-            codes.insert(keccak256(&code_bytes), code_bytes);
-        });
+    // Collect preimages
+    for (address, account) in db.cache.accounts {
+        let hashed_address = keccak256(address);
+        hashed_state
+            .accounts
+            .insert(hashed_address, account.account.as_ref().map(|a| a.info.clone().into()));
 
-        // Collect preimages
-        for (address, account) in db.cache.accounts {
-            let hashed_address = keccak256(address);
-            hashed_state
-                .accounts
-                .insert(hashed_address, account.account.as_ref().map(|a| a.info.clone().into()));
+        if let Some(account_data) = account.account {
+            preimages.insert(hashed_address, alloy_rlp::encode(address).into());
+            let storage = hashed_state
+                .storages
+                .entry(hashed_address)
+                .or_insert_with(|| HashedStorage::new(account.status.was_destroyed()));
 
-            if let Some(account_data) = account.account {
-                preimages.insert(hashed_address, alloy_rlp::encode(address).into());
-                let storage = hashed_state
-                    .storages
-                    .entry(hashed_address)
-                    .or_insert_with(|| HashedStorage::new(account.status.was_destroyed()));
-
-                for (slot, value) in account_data.storage {
-                    let slot_bytes = B256::from(slot);
-                    let hashed_slot = keccak256(slot_bytes);
-                    storage.storage.insert(hashed_slot, value);
-                    preimages.insert(hashed_slot, alloy_rlp::encode(slot_bytes).into());
-                }
+            for (slot, value) in account_data.storage {
+                let slot_bytes = B256::from(slot);
+                let hashed_slot = keccak256(slot_bytes);
+                storage.storage.insert(hashed_slot, value);
+                preimages.insert(hashed_slot, alloy_rlp::encode(slot_bytes).into());
             }
         }
-
-        Ok((codes, preimages, hashed_state, bundle_state))
     }
+
+    Ok((codes, preimages, hashed_state, bundle_state))
 }
 
-struct ProofGenerator;
-
-impl ProofGenerator {
-    fn generate(
-        codes: BTreeMap<B256, Bytes>,
-        preimages: BTreeMap<B256, Bytes>,
-        hashed_state: reth_trie::HashedPostState,
-        state_provider: Box<dyn StateProvider>,
-    ) -> eyre::Result<ExecutionWitness> {
-        let state = state_provider.witness(Default::default(), hashed_state)?;
-        Ok(ExecutionWitness {
-            state,
-            codes: codes.into_values().collect(),
-            keys: preimages.into_values().collect(),
-            ..Default::default()
-        })
-    }
+fn generate(
+    codes: BTreeMap<B256, Bytes>,
+    preimages: BTreeMap<B256, Bytes>,
+    hashed_state: reth_trie::HashedPostState,
+    state_provider: Box<dyn StateProvider>,
+) -> eyre::Result<ExecutionWitness> {
+    let state = state_provider.witness(Default::default(), hashed_state)?;
+    Ok(ExecutionWitness {
+        state,
+        codes: codes.into_values().collect(),
+        keys: preimages.into_values().collect(),
+        ..Default::default()
+    })
 }
 
 #[derive(Debug)]
@@ -157,10 +147,10 @@ where
 
         executor.execute_one(block)?;
         let db = executor.into_state();
-        let (codes, preimages, hashed_state, bundle_state) = DataCollector::collect(db)?;
+        let (codes, preimages, hashed_state, bundle_state) = collect_execution_data(db)?;
 
         let state_provider = self.provider.state_by_block_hash(parent_header.hash())?;
-        let witness = ProofGenerator::generate(codes, preimages, hashed_state, state_provider)?;
+        let witness = generate(codes, preimages, hashed_state, state_provider)?;
 
         Ok((witness, bundle_state))
     }
@@ -508,7 +498,7 @@ mod tests {
         state.bundle_state = bundle_state;
 
         // Call the collect function
-        let result = DataCollector::collect(state);
+        let result = collect_execution_data(state);
         // Verify the function returns successfully
         assert!(result.is_ok());
 
@@ -646,16 +636,11 @@ mod tests {
 
         let hashed_state = reth_trie::HashedPostState::default();
 
-        // Call ProofGenerator::generate
-        let result = ProofGenerator::generate(
-            codes.clone(),
-            preimages.clone(),
-            hashed_state,
-            state_provider,
-        );
+        // Call generate function
+        let result = generate(codes.clone(), preimages.clone(), hashed_state, state_provider);
 
         // Verify result
-        assert!(result.is_ok(), "ProofGenerator::generate should succeed");
+        assert!(result.is_ok(), "generate function should succeed");
         let execution_witness = result.unwrap();
 
         assert!(execution_witness.state.is_empty(), "State should be empty from MockEthProvider");
