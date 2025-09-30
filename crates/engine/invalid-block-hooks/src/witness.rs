@@ -397,16 +397,12 @@ mod tests {
                     code_hash: account.bytecode_hash.unwrap_or_default(),
                     code: None,
                 }),
-                original_info: if i == 0 {
-                    Some(AccountInfo {
-                        balance: account.balance.checked_div(U256::from(2)).unwrap_or(U256::ZERO),
-                        nonce: 0,
-                        code_hash: account.bytecode_hash.unwrap_or_default(),
-                        code: None,
-                    })
-                } else {
-                    None
-                },
+                original_info: (i == 0).then(|| AccountInfo {
+                    balance: account.balance.checked_div(U256::from(2)).unwrap_or(U256::ZERO),
+                    nonce: 0,
+                    code_hash: account.bytecode_hash.unwrap_or_default(),
+                    code: None,
+                }),
                 storage,
                 status: AccountStatus::default(),
             };
