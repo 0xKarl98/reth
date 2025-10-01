@@ -19,7 +19,6 @@ use std::{collections::BTreeMap, fmt::Debug, fs::File, io::Write, path::PathBuf}
 type CollectionResult =
     (BTreeMap<B256, Bytes>, BTreeMap<B256, Bytes>, reth_trie::HashedPostState, BundleState);
 
-    
 /// Converts bundle state to sorted JSON format for deterministic comparison
 fn sort_bundle_state_for_comparison(bundle_state: &BundleState) -> serde_json::Value {
     serde_json::json!({
