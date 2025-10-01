@@ -19,6 +19,8 @@ use std::{collections::BTreeMap, fmt::Debug, fs::File, io::Write, path::PathBuf}
 type CollectionResult =
     (BTreeMap<B256, Bytes>, BTreeMap<B256, Bytes>, reth_trie::HashedPostState, BundleState);
 
+    
+/// Converts bundle state to sorted JSON format for deterministic comparison
 fn sort_bundle_state_for_comparison(bundle_state: &BundleState) -> serde_json::Value {
     serde_json::json!({
         "state": bundle_state.state.iter().map(|(addr, acc)| {
@@ -370,7 +372,7 @@ mod tests {
     use reth_testing_utils::generators::{self, random_block, random_eoa_accounts, BlockParams};
     use revm_bytecode::Bytecode;
 
-    /// Creates a test BundleState using generators for more realistic test data
+    /// Creates a test `BundleState` using generators for more realistic test data
     fn create_bundle_state() -> BundleState {
         let mut rng = generators::rng();
         let mut bundle_state = BundleState::default();
