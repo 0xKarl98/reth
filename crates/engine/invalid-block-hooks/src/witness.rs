@@ -46,6 +46,7 @@ fn sort_bundle_state_for_comparison(bundle_state: &BundleState) -> serde_json::V
     })
 }
 
+/// Extracts execution data including codes, preimages, and hashed state from database
 fn collect_execution_data(
     mut db: State<StateProviderDatabase<Box<dyn StateProvider>>>,
 ) -> eyre::Result<CollectionResult> {
@@ -86,6 +87,7 @@ fn collect_execution_data(
     Ok((codes, preimages, hashed_state, bundle_state))
 }
 
+/// Generates execution witness from collected codes, preimages, and hashed state
 fn generate(
     codes: BTreeMap<B256, Bytes>,
     preimages: BTreeMap<B256, Bytes>,
@@ -314,13 +316,15 @@ where
         Ok(())
     }
 
+    /// Serializes and saves a value to a JSON file in the output directory
     fn save_file<T: Serialize>(&self, filename: String, value: &T) -> eyre::Result<PathBuf> {
         let path = self.output_directory.join(filename);
         File::create(&path)?.write_all(serde_json::to_string(value)?.as_bytes())?;
 
         Ok(path)
     }
-
+    
+    /// Compares two values and saves their diff to a file in the output directory
     fn save_diff<T: PartialEq + Debug>(
         &self,
         filename: String,
@@ -371,7 +375,7 @@ mod tests {
     use reth_testing_utils::generators::{self, random_block, random_eoa_accounts, BlockParams};
     use revm_bytecode::Bytecode;
 
-    /// Creates a test `BundleState` using generators for more realistic test data
+    /// Creates a test BundleState with realistic accounts, contracts, and reverts
     fn create_bundle_state() -> BundleState {
         let mut rng = generators::rng();
         let mut bundle_state = BundleState::default();
@@ -539,7 +543,7 @@ mod tests {
         assert!(result.is_ok(), "re_execute_block should return Ok");
     }
 
-    /// Helper function to create `InvalidBlockWitnessHook` for testing
+    /// Creates test InvalidBlockWitnessHook with temporary directory
     fn create_test_hook() -> (
         InvalidBlockWitnessHook<MockEthProvider<EthPrimitives, ChainSpec>, EthEvmConfig>,
         PathBuf,
@@ -704,7 +708,7 @@ mod tests {
         assert!(diff_file.exists(), "Diff file should be created");
     }
 
-    //Fixture functions
+    /// Creates test TrieUpdates with account nodes and removed nodes
     fn create_test_trie_updates() -> TrieUpdates {
         use alloy_primitives::map::HashMap;
         use reth_trie::{updates::TrieUpdates, BranchNodeCompact, Nibbles};
