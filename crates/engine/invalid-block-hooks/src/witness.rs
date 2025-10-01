@@ -323,7 +323,7 @@ where
 
         Ok(path)
     }
-    
+
     /// Compares two values and saves their diff to a file in the output directory
     fn save_diff<T: PartialEq + Debug>(
         &self,
