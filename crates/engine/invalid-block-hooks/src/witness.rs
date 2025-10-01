@@ -375,7 +375,7 @@ mod tests {
     use reth_testing_utils::generators::{self, random_block, random_eoa_accounts, BlockParams};
     use revm_bytecode::Bytecode;
 
-    /// Creates a test BundleState with realistic accounts, contracts, and reverts
+    /// Creates a test `BundleState` with realistic accounts, contracts, and reverts
     fn create_bundle_state() -> BundleState {
         let mut rng = generators::rng();
         let mut bundle_state = BundleState::default();
@@ -543,7 +543,7 @@ mod tests {
         assert!(result.is_ok(), "re_execute_block should return Ok");
     }
 
-    /// Creates test InvalidBlockWitnessHook with temporary directory
+    /// Creates test `InvalidBlockWitnessHook` with temporary directory
     fn create_test_hook() -> (
         InvalidBlockWitnessHook<MockEthProvider<EthPrimitives, ChainSpec>, EthEvmConfig>,
         PathBuf,
@@ -708,7 +708,7 @@ mod tests {
         assert!(diff_file.exists(), "Diff file should be created");
     }
 
-    /// Creates test TrieUpdates with account nodes and removed nodes
+    /// Creates test `TrieUpdates` with account nodes and removed nodes
     fn create_test_trie_updates() -> TrieUpdates {
         use alloy_primitives::map::HashMap;
         use reth_trie::{updates::TrieUpdates, BranchNodeCompact, Nibbles};
