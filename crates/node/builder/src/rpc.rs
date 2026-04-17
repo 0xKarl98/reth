@@ -32,7 +32,7 @@ use reth_node_core::{
     version::{version_metadata, CLIENT_CODE},
 };
 use reth_payload_builder::{PayloadBuilderHandle, PayloadStore};
-use reth_provider::BalStoreHandle;
+use reth_provider::{BalStoreHandle, RecentBalStore};
 use reth_rpc::{
     eth::{core::EthRpcConverterFor, DevSigner, EthApiTypes, FullEthApiServer},
     AdminApi,
@@ -1493,7 +1493,10 @@ pub struct BasicEngineApiBuilder<PVB> {
 impl<PVB> BasicEngineApiBuilder<PVB> {
     /// Creates a new instance from the payload validator builder.
     pub fn new(payload_validator_builder: PVB) -> Self {
-        Self { payload_validator_builder, bal_store: BalStoreHandle::default() }
+        Self {
+            payload_validator_builder,
+            bal_store: BalStoreHandle::new(RecentBalStore::default()),
+        }
     }
 
     /// Sets the BAL store injected into the engine API.
