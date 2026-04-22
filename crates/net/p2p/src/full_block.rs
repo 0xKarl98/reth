@@ -322,17 +322,15 @@ where
         self.block_result.as_ref().map(|block| block.number()).or_else(|| self.block.block_number())
     }
 
-    // Compare the single raw BAL payload against the header commitment when the header carries
-    // one. We keep this at the raw access-list level because the header commits to the BAL RLP
-    // bytes, not to a decoded higher-level representation.
+    // If the header includes a BAL hash, require the raw BAL bytes to match it.
+    // The header commits to the BAL RLP bytes, so compare the sealed raw payload directly.
     fn access_list_matches_header(
         block: &SealedBlock<Client::Block>,
         access_list: &Sealed<Bytes>,
     ) -> bool {
         match block.header().block_access_list_hash() {
             Some(expected_hash) => access_list.hash() == expected_hash,
-            // Headers without a BAL commitment cannot prove a mismatch here, so this helper only
-            // treats an explicit committed hash mismatch as invalid.
+            // No BAL hash in the header means there is nothing to compare against here.
             None => true,
         }
     }
