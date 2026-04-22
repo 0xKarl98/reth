@@ -207,7 +207,7 @@ impl<N: NetworkPrimitives> StateFetcher<N> {
     /// Returns the next action to return
     fn poll_action(&mut self) -> PollAction {
         loop {
-            // we only check and not pop here since we don't know yet whether a peer is available.
+            // Only pop once we know whether the request can be dispatched or must be requeued.
             if self.queued_requests.is_empty() {
                 return PollAction::NoRequests
             }
