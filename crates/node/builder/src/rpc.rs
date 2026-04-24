@@ -32,6 +32,7 @@ use reth_node_core::{
     version::{version_metadata, CLIENT_CODE},
 };
 use reth_payload_builder::{PayloadBuilderHandle, PayloadStore};
+use reth_provider::{BalStoreHandle, RecentBalStore};
 use reth_rpc::{
     eth::{core::EthRpcConverterFor, DevSigner, EthApiTypes, FullEthApiServer},
     AdminApi,
@@ -1518,7 +1519,7 @@ where
             commit: version_metadata().vergen_git_sha.to_string(),
         };
 
-        Ok(EngineApi::new(
+        Ok(EngineApi::with_bal_store(
             ctx.node.provider().clone(),
             ctx.config.chain.clone(),
             ctx.beacon_engine_handle.clone(),
@@ -1530,6 +1531,7 @@ where
             engine_validator,
             ctx.config.engine.accept_execution_requests_hash,
             ctx.node.network().clone(),
+            BalStoreHandle::new(RecentBalStore::default()),
         ))
     }
 }
