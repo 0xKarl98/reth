@@ -97,37 +97,6 @@ where
         validator: Validator,
         accept_execution_requests_hash: bool,
         network: impl NetworkInfo + 'static,
-    ) -> Self {
-        Self::with_bal_store(
-            provider,
-            chain_spec,
-            beacon_consensus,
-            payload_store,
-            tx_pool,
-            task_spawner,
-            client,
-            capabilities,
-            validator,
-            accept_execution_requests_hash,
-            network,
-            BalStoreHandle::default(),
-        )
-    }
-
-    /// Create new instance of [`EngineApi`] with a custom BAL store.
-    #[expect(clippy::too_many_arguments)]
-    pub fn with_bal_store(
-        provider: Provider,
-        chain_spec: Arc<ChainSpec>,
-        beacon_consensus: ConsensusEngineHandle<PayloadT>,
-        payload_store: PayloadStore<PayloadT>,
-        tx_pool: Pool,
-        task_spawner: Runtime,
-        client: ClientVersionV1,
-        capabilities: EngineCapabilities,
-        validator: Validator,
-        accept_execution_requests_hash: bool,
-        network: impl NetworkInfo + 'static,
         bal_store: BalStoreHandle,
     ) -> Self {
         let is_syncing = Arc::new(move || network.is_syncing());
@@ -1642,7 +1611,7 @@ mod tests {
         let payload_store = spawn_test_payload_service();
         let (to_engine, engine_rx) = unbounded_channel();
         let task_executor = Runtime::test();
-        let api = EngineApi::with_bal_store(
+        let api = EngineApi::new(
             provider.clone(),
             chain_spec.clone(),
             ConsensusEngineHandle::new(to_engine),
@@ -1720,6 +1689,7 @@ mod tests {
             EthereumEngineValidator::new(chain_spec),
             false,
             NoopNetwork::default(),
+            BalStoreHandle::default(),
         );
 
         tokio::spawn(async move {
@@ -1817,6 +1787,7 @@ mod tests {
             EthereumEngineValidator::new(chain_spec),
             false,
             TestNetworkInfo { syncing: true },
+            BalStoreHandle::default(),
         );
 
         let res = api.get_blobs_v3_metered(vec![B256::ZERO]);

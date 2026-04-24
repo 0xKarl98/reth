@@ -67,6 +67,7 @@ where
         EthereumEngineValidator::new(MAINNET.clone()),
         false,
         NoopNetwork::default(),
+        reth_storage_api::BalStoreHandle::default(),
     );
     let module = AuthRpcModule::new(engine_api);
     module.start_server(config).await.unwrap()
