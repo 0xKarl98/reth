@@ -8317,6 +8317,7 @@ dependencies = [
  "reth-static-file-types",
  "reth-storage-errors",
  "rustc-hash",
+ "same-file",
  "serde",
  "serde_json",
  "strum 0.27.2",

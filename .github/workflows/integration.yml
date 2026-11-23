@@ -74,10 +74,11 @@ jobs:
           cache-on-failure: true
       - name: Run tests
         run: |
+          # ef-test-runner pulls in ef-tests, which disables database writer locks.
           cargo nextest run \
             --no-fail-fast \
             --locked --features "asm-keccak" \
-            --workspace --exclude ef-tests \
+            --workspace --exclude ef-tests --exclude ef-test-runner \
             -E "kind(test) and not binary(e2e_testsuite)"
 
   integration-success:

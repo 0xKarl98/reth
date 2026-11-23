@@ -2,8 +2,13 @@
 
 #![cfg_attr(feature = "disable-lock", allow(dead_code))]
 
+use reth_fs_util::{self as fs, FsPathError};
 use reth_storage_errors::lockfile::StorageLockError;
+use same_file::Handle;
 use std::{
+    ffi::OsStr,
+    fs::File,
+    io::Write,
     path::{Path, PathBuf},
     process,
     sync::{Arc, OnceLock},
@@ -12,6 +17,12 @@ use sysinfo::{ProcessRefreshKind, RefreshKind, System};
 
 /// File lock name.
 const LOCKFILE_NAME: &str = "lock";
+
+/// Stable inode for shared writer and exclusive cleanup locks.
+const GUARD_FILE_NAME: &str = ".reth-storage-lock";
+
+/// Prevents a writer from reopening stores after a partially completed destructive reset.
+const DROP_MARKER: &str = ".reth-drop-in-progress";
 
 /// A file lock for a storage directory to ensure exclusive read-write access across different
 /// processes.
@@ -31,50 +42,93 @@ impl StorageLock {
     pub fn try_acquire(path: &Path) -> Result<Self, StorageLockError> {
         #[cfg(feature = "disable-lock")]
         {
-            let file_path = path.join(LOCKFILE_NAME);
             // Too expensive for ef-tests to write/read lock to/from disk.
-            Ok(Self(Arc::new(StorageLockInner { file_path })))
+            Ok(Self(Arc::new(StorageLockInner {
+                directory: path.into(),
+                guard: None,
+                exclusive: false,
+            })))
         }
 
         #[cfg(not(feature = "disable-lock"))]
         Self::try_acquire_file_lock(path)
     }
 
-    /// Returns whether a directory entry is the storage writer lock.
-    pub fn is_lock_file(name: &std::ffi::OsStr) -> bool {
-        name == LOCKFILE_NAME
+    /// Returns whether a directory entry is part of the storage writer lock.
+    pub fn is_lock_file(name: &OsStr) -> bool {
+        name == LOCKFILE_NAME || name == GUARD_FILE_NAME
     }
 
-    /// Acquire a file write lock.
     #[cfg(any(test, not(feature = "disable-lock")))]
     fn try_acquire_file_lock(path: &Path) -> Result<Self, StorageLockError> {
-        let file_path = path.join(LOCKFILE_NAME);
-        if let Some(process_lock) = ProcessUID::parse(&file_path)? &&
-            process_lock.pid != (process::id() as usize) &&
-            process_lock.is_active()
-        {
-            tracing::error!(
-                target: "reth::db::lockfile",
-                path = ?file_path,
-                pid = process_lock.pid,
-                start_time = process_lock.start_time,
-                "Storage lock already taken."
-            );
-            return Err(StorageLockError::Taken(process_lock.pid))
-        }
+        StorageLockInner::acquire(path, false).map(|inner| Self(Arc::new(inner)))
+    }
+}
 
-        Ok(Self(Arc::new(StorageLockInner::new(file_path)?)))
+/// Exclusive storage guard for destructive maintenance. Ordinary writers can reacquire their
+/// locks within one process, but cannot share a directory with a reset.
+#[derive(Debug)]
+pub struct StorageDropLock(StorageLockInner);
+
+impl StorageDropLock {
+    /// Locks an existing or missing directory without opening the store or validating its data.
+    /// Returns an error if a writer or another reset holds it.
+    pub fn try_acquire(path: &Path) -> Result<Self, StorageLockError> {
+        StorageLockInner::acquire(path, true).map(Self)
+    }
+
+    /// Returns the recorded targets of an interrupted reset, or `None` before cleanup starts.
+    pub fn drop_marker(&self) -> fs::Result<Option<Vec<u8>>> {
+        match fs::read(self.0.directory.join(DROP_MARKER)) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(FsPathError::Read { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Atomically records the confirmed targets before any store is removed. Writers remain
+    /// excluded until [`Self::finish_drop`] removes the marker.
+    pub fn begin_drop(&self, targets: &[u8]) -> fs::Result<()> {
+        fs::atomic_write_file(&self.0.directory.join(DROP_MARKER), |file| file.write_all(targets))
+    }
+
+    /// Allows writers to reopen the database after all its stores have been cleared.
+    pub fn finish_drop(&self) -> fs::Result<()> {
+        fs::remove_file(self.0.directory.join(DROP_MARKER))
+    }
+
+    /// Destructively removes the entries in the locked directory, keeping the writer lock until
+    /// the guard is dropped. An interrupted removal can be retried with a new guard.
+    pub fn clear_directory(&self) -> fs::Result<()> {
+        let directory = &self.0.directory;
+        for entry in fs::read_dir(directory)? {
+            let entry = entry.map_err(|err| FsPathError::read_dir(err, directory))?;
+            let name = entry.file_name();
+            if StorageLock::is_lock_file(&name) || name == DROP_MARKER {
+                continue
+            }
+            let path = entry.path();
+            if entry.file_type().map_err(|err| FsPathError::metadata(err, &path))?.is_dir() {
+                fs::remove_dir_all(path)?;
+            } else {
+                fs::remove_file(path)?;
+            }
+        }
+        Ok(())
     }
 }
 
 impl Drop for StorageLockInner {
     fn drop(&mut self) {
         // The lockfile is not created in disable-lock mode, so we don't need to delete it.
-        #[cfg(any(test, not(feature = "disable-lock")))]
-        {
-            let file_path = &self.file_path;
+        if self.guard.is_some() {
+            let file_path = self.directory.join(LOCKFILE_NAME);
             if file_path.exists() {
-                if let Ok(Some(process_uid)) = ProcessUID::parse(file_path) {
+                if let Ok(Some(process_uid)) = ProcessUID::parse(&file_path) {
                     // Only remove if the lock file belongs to our process
                     if process_uid.pid == process::id() as usize {
                         if let Err(err) = reth_fs_util::remove_file(file_path) {
@@ -94,27 +148,69 @@ impl Drop for StorageLockInner {
                     }
                 }
             }
+            if self.exclusive {
+                let path = self.directory.join(GUARD_FILE_NAME);
+                if let Err(err) = fs::remove_file(&path) {
+                    tracing::error!(%err, "Failed to remove the cleanup lock file");
+                }
+            }
         }
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct StorageLockInner {
-    file_path: PathBuf,
+    directory: PathBuf,
+    /// Keeps a reset exclusive even while a writer is starting and publishing its PID.
+    guard: Option<Handle>,
+    exclusive: bool,
 }
 
 impl StorageLockInner {
-    /// Creates lock file and writes this process PID into it.
-    fn new(file_path: PathBuf) -> Result<Self, StorageLockError> {
-        // Create the directory if it doesn't exist
-        if let Some(parent) = file_path.parent() {
-            reth_fs_util::create_dir_all(parent).map_err(StorageLockError::other)?;
+    /// Acquire a file write lock.
+    fn acquire(path: &Path, exclusive: bool) -> Result<Self, StorageLockError> {
+        fs::create_dir_all(path).map_err(StorageLockError::other)?;
+        let guard_path = path.join(GUARD_FILE_NAME);
+        let guard = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&guard_path)
+            .map_err(StorageLockError::other)?;
+        let guard = Handle::from_file(guard).map_err(StorageLockError::other)?;
+        if exclusive { guard.as_file().try_lock() } else { guard.as_file().try_lock_shared() }
+            .map_err(StorageLockError::other)?;
+
+        // The previous reset may have unlinked this inode between open and try_lock.
+        if guard != Handle::from_path(&guard_path).map_err(StorageLockError::other)? {
+            return Err(StorageLockError::Other(format!("Storage lock changed at {guard_path:?}")))
         }
 
-        // Write this process unique identifier (pid & start_time) to file
-        ProcessUID::own().write(&file_path)?;
+        if !exclusive && path.join(DROP_MARKER).try_exists().map_err(StorageLockError::other)? {
+            return Err(StorageLockError::Other(format!(
+                "Unfinished database drop at {}. Retry reth db drop before starting a writer",
+                path.display()
+            )))
+        }
 
-        Ok(Self { file_path })
+        let file_path = path.join(LOCKFILE_NAME);
+        if let Some(process_lock) = ProcessUID::parse(&file_path)? &&
+            process_lock.pid != (process::id() as usize) &&
+            process_lock.is_active()
+        {
+            tracing::error!(
+                target: "reth::db::lockfile",
+                path = ?file_path,
+                pid = process_lock.pid,
+                start_time = process_lock.start_time,
+                "Storage lock already taken."
+            );
+            return Err(StorageLockError::Taken(process_lock.pid))
+        }
+
+        ProcessUID::own().write(&file_path)?;
+        Ok(Self { directory: path.into(), guard: Some(guard), exclusive })
     }
 }
 
@@ -237,5 +333,31 @@ mod tests {
         assert!(lock_file.exists());
         drop(lock);
         assert!(!lock_file.exists());
+    }
+
+    #[test]
+    fn reset_excludes_writers_through_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = StorageLock::try_acquire_file_lock(dir.path()).unwrap();
+        assert!(matches!(
+            StorageDropLock::try_acquire(dir.path()),
+            Err(StorageLockError::Other(_))
+        ));
+        drop(writer);
+        let reset = StorageDropLock::try_acquire(dir.path()).unwrap();
+        fs::write(dir.path().join("data"), b"data").unwrap();
+        reset.clear_directory().unwrap();
+        assert!(!dir.path().join("data").exists());
+        assert!(matches!(
+            StorageLock::try_acquire_file_lock(dir.path()),
+            Err(StorageLockError::Other(_))
+        ));
+        assert!(matches!(
+            StorageDropLock::try_acquire(dir.path()),
+            Err(StorageLockError::Other(_))
+        ));
+        drop(reset);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+        StorageLock::try_acquire_file_lock(dir.path()).unwrap();
     }
 }

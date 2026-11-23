@@ -95,6 +95,7 @@ mod tests {
     use assert_matches::assert_matches;
     use rand::seq::SliceRandom;
     use reth_db::{
+        lockfile::StorageLock,
         models::{AccountBeforeTx, StorageBeforeTx},
         test_utils::create_test_static_files_dir,
     };
@@ -628,13 +629,11 @@ mod tests {
         }
     }
 
-    /// Returns the number of files in the provided path, excluding ".lock" files.
+    /// Counts the static files, excluding storage lock files.
     fn count_files_without_lockfile(path: impl AsRef<Path>) -> eyre::Result<usize> {
-        let is_lockfile =
-            |entry: &fs::DirEntry| entry.path().file_name().is_some_and(|name| name == "lock");
         let count = fs::read_dir(path)?
             .filter_map(|entry| entry.ok())
-            .filter(|entry| !is_lockfile(entry))
+            .filter(|entry| !StorageLock::is_lock_file(&entry.file_name()))
             .count();
 
         Ok(count)

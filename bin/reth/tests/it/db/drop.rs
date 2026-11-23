@@ -1,5 +1,6 @@
 use super::*;
 use reth_chainspec::{ChainSpec, DEV};
+use reth_db::lockfile::StorageLock;
 use reth_provider::providers::RocksDBProvider;
 
 #[cfg(unix)]
@@ -108,6 +109,50 @@ fn clears_imported_transaction_lookup() {
         "0x5bc704d4eb4ce7fe319705d2f888516961426a177f2799c9f934b5df7466dd33",
     ];
     assert_eq!(invoke("db", &lookup).trim(), "6");
+    let dir = node.path();
+    let spec = genesis.to_str().unwrap();
+    let wal = dir.join("exex/wal");
+    fs::create_dir_all(wal.parent().unwrap()).unwrap();
+    fs::write(&wal, []).unwrap();
+    let expected = fs::remove_dir_all(&wal).unwrap_err();
+    assert_eq!(
+        run(reth_error, "db", dir, spec, &["drop", "--force"]),
+        format!("Error: failed to remove dir {wal:?}: {expected}")
+    );
+    assert!(!dir.join("rocksdb/CURRENT").exists());
+    assert!(dir.join("db/mdbx.dat").is_file());
+    assert_eq!(
+        run(reth_error, "init", dir, spec, &[]),
+        format!(
+            "Error: Unfinished database drop at {}. Retry reth db drop before starting a writer",
+            dir.join("db").display()
+        )
+    );
+    let marker = dir.join("db/.reth-drop-in-progress");
+    let original = fs::read(&marker).unwrap();
+    let mismatch = "Error: Unfinished database drop has different targets. Retry with the original chain and storage paths";
+    assert_eq!(run(reth_error, "db", dir, "dev", &["drop", "--force"]), mismatch);
+    let other = tempfile::tempdir().unwrap();
+    let rocks = other.path().join("rocksdb");
+    let retry = || {
+        run(
+            reth_error,
+            "db",
+            dir,
+            spec,
+            &["--datadir.rocksdb", rocks.to_str().unwrap(), "drop", "--force"],
+        )
+    };
+    assert_eq!(retry(), mismatch);
+    fs::create_dir(&rocks).unwrap();
+    assert_eq!(retry(), mismatch);
+    run(reth_ok, "init", other.path(), "dev", &[]);
+    assert_eq!(retry(), mismatch);
+    assert!(rocks.join("CURRENT").is_file());
+    assert_eq!(fs::read(&marker).unwrap(), original);
+    fs::remove_file(wal).unwrap();
+    // Interrupted cleanup can leave the MDBX checkpoints ahead of the remaining static files.
+    fs::remove_dir_all(dir.join("static_files")).unwrap();
     invoke("db", &["drop", "--force"]);
     invoke("init", &["--storage.v2=true"]);
     assert_eq!(invoke("db", &lookup), "");
@@ -239,4 +284,62 @@ fn requires_readable_rocksdb_directory() {
     }
     fs::set_permissions(&rocks, original).unwrap();
     run(reth_ok, "db", dir, "dev", &["drop", "--force"]);
+}
+
+#[test]
+fn respects_storage_writer_locks() {
+    let node = tempfile::tempdir().unwrap();
+    let dir = node.path();
+    run(reth_ok, "init", dir, "dev", &[]);
+    for path in [dir.join("db"), dir.join("static_files")] {
+        let _writer = StorageLock::try_acquire(&path).unwrap();
+        assert_eq!(
+            run(reth_error, "db", dir, "dev", &["drop", "--force"]),
+            format!("Error: Could not lock {}", path.display())
+        );
+        assert!(dir.join("rocksdb/CURRENT").is_file());
+        assert!(dir.join("db/mdbx.dat").is_file());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn retry_checks_symlink_target() {
+    let node = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let dir = node.path();
+    let rocks = dir.join("external");
+    let link = dir.join("linked");
+    fs::create_dir(&rocks).unwrap();
+    symlink(&rocks, &link).unwrap();
+    let invoke = |check, cmd, args: &[&str]| {
+        run(
+            check,
+            cmd,
+            dir,
+            "dev",
+            &[&["--datadir.rocksdb", link.to_str().unwrap()], args].concat(),
+        )
+    };
+    invoke(reth_ok, "init", &[]);
+    run(reth_ok, "init", other.path(), "dev", &[]);
+    let wal = dir.join("exex/wal");
+    fs::create_dir_all(wal.parent().unwrap()).unwrap();
+    fs::write(&wal, []).unwrap();
+    let expected = fs::remove_dir_all(&wal).unwrap_err();
+    assert_eq!(
+        invoke(reth_error, "db", &["drop", "--force"]),
+        format!("Error: failed to remove dir {wal:?}: {expected}")
+    );
+    fs::remove_file(wal).unwrap();
+    fs::remove_file(&link).unwrap();
+    symlink(other.path().join("rocksdb"), &link).unwrap();
+    assert_eq!(invoke(reth_error,"db",&["drop","--force"]), "Error: Unfinished database drop has different targets. Retry with the original chain and storage paths");
+    assert!(other.path().join("rocksdb/CURRENT").is_file());
+    fs::remove_file(&link).unwrap();
+    // Native destruction may have removed the entire directory.
+    fs::create_dir_all(&rocks).unwrap();
+    symlink(&rocks, &link).unwrap();
+    invoke(reth_ok, "db", &["drop", "--force"]);
+    assert!(!dir.join("db").exists());
 }

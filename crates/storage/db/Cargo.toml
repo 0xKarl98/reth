@@ -33,6 +33,7 @@ reth-metrics = { workspace = true, optional = true }
 metrics = { workspace = true, optional = true }
 
 # misc
+same-file.workspace = true
 page_size = { workspace = true, optional = true }
 thiserror.workspace = true
 tempfile = { workspace = true, optional = true }
